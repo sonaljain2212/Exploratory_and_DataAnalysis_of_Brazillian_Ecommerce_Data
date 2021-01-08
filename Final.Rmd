@@ -1,0 +1,658 @@
+---
+title: "Exploratory and Predictive Analysis of Ecommerce Dataset"
+author: "Aveek Choudhury - Harshita Ved - Priyal Maheshwari - Sarang Pande - Sonal Jain"
+date: "12/2/2019"
+output: 
+  html_document:
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Overview
+
+E-commerce is a trending business sector, of electronically buying and selling products over the internet. This fastgrowing industry has also adapted features like online payments, internet marketing, door-step delivery, returns and exchanges, etc. Since it is a widespread industry that adds to human convenience and luxuries, there is a lot of scope for improvements and business growth, which brings profits to both consumers and industry. 
+
+## Understanding the problem
+
+- Analysis on the buying trends of customers and determine if a customer is likely going to buy another product based on what he is currently purchasing
+- Based on the reviews given by the customers, we will be rating the products sold by the store by analyzing the text in the reviews
+- Visualize the sale throughout brazil on maps based on various seasons
+
+## Description of the dataset
+
+This is a Brazilian ecommerce public dataset of orders made at Olist Store. The dataset has information of 100k orders from 2016 to 2018 made at multiple marketplaces in Brazil. The Dataset contains multiple tables providing information on actual ecommerce purchases along with various other dimensions of a particular purchase like Customer Information, Seller Information, Product Metadata as well as Customer reviews on their purchase experience. The dataset also has geolocation file that relates Brazilian zip codes to latitude/longitude coordinates. 
+
+```{r libraries, message=FALSE, include=FALSE}
+# Main Frameworks
+library(ggplot2)
+library(plotly)
+
+# Coding Packages
+library(dplyr)
+library(stringr)
+library(lubridate)
+library(tidyverse)
+library(geobr)
+library(rgeos)
+library(ggimage)
+```
+
+```{r data_reading, message=FALSE, include=FALSE}
+customers_data <- read.csv("brazilian-ecommerce/olist_customers_dataset.csv", stringsAsFactors = FALSE)
+geolocation_data <- read.csv("brazilian-ecommerce/olist_geolocation_dataset.csv")
+items_data <- read.csv("brazilian-ecommerce/olist_order_items_dataset.csv")
+payments_data <- read.csv("brazilian-ecommerce/olist_order_payments_dataset.csv")
+reviews_data <- read.csv("brazilian-ecommerce/olist_order_reviews_dataset.csv")
+orders_data <- read.csv("brazilian-ecommerce/olist_orders_dataset.csv")
+products_data <- read.csv("brazilian-ecommerce/olist_products_dataset.csv")
+sellers_data <- read.csv("brazilian-ecommerce/olist_sellers_dataset.csv")
+translations_data <- read_csv("brazilian-ecommerce/product_category_name_translation.csv")
+brazil_holidays_data <- read.csv("brazilian-ecommerce/brazil_holidays.csv")
+state <- read_state(code_state="all", year=2018) 
+```
+
+```{r functions, message=FALSE, results='hide', include=FALSE}
+create_column_mapping <- function(old_column, new_column, dataframe, filename) {
+  if(new_column %in% colnames(dataframe))
+  {
+    return(dataframe)
+  }
+  column1 <- seq.int(nrow(unique(dataframe[old_column])))
+  column2 <- unique(dataframe[old_column])
+  mapping <- data.frame(column1, column2)
+  names(mapping) <- c(new_column, old_column)
+  dataframe <- dataframe %>% left_join(mapping, by = old_column) %>% select(-old_column)
+  write.csv(mapping, filename, row.names=FALSE)  
+  return(dataframe)
+}
+
+implement_mapping <- function(dataframe, column_name){
+  mapping <- switch(column_name, 
+                    "order_id" = read.csv("brazilian-ecommerce/olist_orders_translation_dataset.csv"),
+                    "customer_id" = read.csv("brazilian-ecommerce/olist_customers_translation_dataset.csv"),
+                    "product_id" = read.csv("brazilian-ecommerce/olist_products_translation_dataset.csv"),
+                    "seller_id" = read.csv("brazilian-ecommerce/olist_sellers_translation_dataset.csv")) 
+  df <- dataframe %>% left_join(mapping, by = column_name) %>% select(-column_name)
+  rm(mapping)
+  return(df)
+}
+
+```
+
+```{r data_cleaning, message=FALSE, results='hide', include=FALSE}
+customers_data <- create_column_mapping("customer_id", "customer_ID", customers_data, "brazilian-ecommerce/olist_customers_translation_dataset.csv")
+orders_data <- create_column_mapping("order_id", "order_ID", orders_data, "brazilian-ecommerce/olist_orders_translation_dataset.csv")
+products_data <- create_column_mapping("product_id", "product_ID", products_data, "brazilian-ecommerce/olist_products_translation_dataset.csv")
+sellers_data <- create_column_mapping("seller_id", "seller_ID", sellers_data, "brazilian-ecommerce/olist_sellers_translation_dataset.csv")
+reviews_data <- create_column_mapping("review_id", "review_ID", reviews_data, "brazilian-ecommerce/olist_reviews_translation_dataset.csv")
+
+reviews_data <- implement_mapping(reviews_data, "order_id")
+payments_data <- implement_mapping(payments_data, "order_id")
+items_data <- implement_mapping(items_data, "order_id")
+orders_data <- implement_mapping(orders_data, "customer_id")
+items_data <- implement_mapping(items_data, "product_id")
+items_data <- implement_mapping(items_data, "seller_id")
+
+geo_data <-  distinct(geolocation_data,geolocation_state,geolocation_zip_code_prefix,geolocation_city, .keep_all = TRUE)
+ordertable <- left_join(orders_data,customers_data)
+ordergeotable <- left_join(ordertable,geo_data, by= c("customer_zip_code_prefix"="geolocation_zip_code_prefix","customer_state"="geolocation_state", "customer_city"="geolocation_city"))
+
+ordertable <- separate(ordertable,order_delivered_customer_date , into=c("deldate", "deltime"), sep=" ")
+ordertable <- separate(ordertable,order_purchase_timestamp , into=c("purchasedate", "purchasetime"), sep=" ")
+ordertable <- separate(ordertable,order_approved_at , into=c("approveddate", "approvedtime"), sep=" ")
+ordertable <- separate(ordertable,order_delivered_carrier_date , into=c("delcarrierdate", "delcarriertime"), sep=" ")
+ordertable <- separate(ordertable,order_estimated_delivery_date , into=c("estimateddeldate", "estimateddeltime"), sep=" ")
+ordertable <- separate(ordertable, deldate , into=c("year", "month", "date"), sep="-")
+ordertable <- separate(ordertable, purchasedate , into=c("year", "month", "date"), sep="-")
+```
+
+## Order status of customers of each state
+
+```{r Sonal1, message = FALSE, warning=FALSE}
+ordergeotable <- separate(ordergeotable,order_purchase_timestamp , into=c("purchasedate", "purchasetime"), sep=" ")
+ordergeotable <- separate(ordergeotable, purchasedate , into=c("year", "month", "date"), sep="-")
+
+geo_data <-na.omit(ordergeotable)
+state <- read_state(code_state="all", year=2018) 
+
+g <- ggplot() + 
+  geom_sf(data=state, fill="#2D3E50", color="#FEBF57", size=.15, show.legend = FALSE) 
+
+#all states
+a <- g + geom_point(ordergeotable, mapping = aes(x=geolocation_lng, y=geolocation_lat, color = customer_state), position = "jitter", size=.15, alpha=1/2)+
+  coord_sf(xlim = c(-70,-30), ylim = c(-40,5), expand = FALSE)+ facet_wrap(~year)+
+  labs(y="Latitude of location.", x="longitude of location.",title="Mapping of different states of brazil in Map")
+
+plot(a)
+```
+
+
+## Add Title
+
+```{r Sonal2, message = FALSE, warning=FALSE}
+freq_count <- as.data.frame(table(ordertable$customer_unique_id))
+odtbl <- ordertable %>% select_at(vars(year, month, customer_unique_id)) %>%
+  distinct_at(vars(year,month, customer_unique_id)) %>%
+  arrange_at(vars(year, month)) %>%
+  count_(vars(year, month))
+
+odtbl <- odtbl %>% filter(!((month == "09" | month == "10") & year == "2018"))
+
+odd <-odtbl %>% ggplot() + geom_line(mapping = aes(x = month, y = n, group = 1),show.legend = FALSE) +facet_wrap(~year)+geom_point(mapping = aes(x = month, y = n, group = 1))+labs(x="Month", y="Count of new customers added each month", title = "New customers purchased every consecutive month")+theme(axis.text.y= element_text(angle=90))
+
+ggplotly(odd)
+```
+
+## Overall sales based on holidays
+
+```{r Sarang1, message=FALSE, warning=FALSE}
+a <- items_data %>% left_join(orders_data) %>% mutate(mny = format(strptime(order_purchase_timestamp, "%Y-%m-%d %H:%M:%S"),'%Y-%m')) %>% group_by(mny) %>% summarise(total = sum(price)) %>% arrange(mny)
+
+brazil_holidays <- brazil_holidays_data %>% mutate(mny = strftime(Date, format = "%Y-%m")) %>% group_by(mny) %>% mutate(holidays_by_week = paste0(Holiday, collapse = ",")) %>% select(mny, holidays_by_week)
+
+brazil_holidays <- brazil_holidays[!duplicated(brazil_holidays$mny),]
+
+p <- plot_ly(a, x = ~mny, y = ~total, type = 'scatter', mode = 'lines')
+
+p <- p %>%
+  add_trace(
+    type = 'bar',
+    x = brazil_holidays$mny, 
+    y = 1000000,
+    text = brazil_holidays$holidays_by_week,
+    hoverinfo = 'text',
+    marker = list(color='yellow'),
+    showlegend = F,
+    width = 0.3
+  ) %>% layout(xaxis = list(autotick = F, dtick = 1)) %>%
+  layout(title = 'Monthly sale along with yearly holidays in Brazil',
+         xaxis = list(title = 'Time (Year - Month)',
+                      autotick = F, dtick = 1),
+         yaxis = list(title = 'Total Purchase (in $)'))
+
+p
+```
+
+Clearly, the sale increases significantly when there is an event during a particular month.
+
+## Hour by day transactions
+
+```{r Sarang2, message=FALSE, warning=FALSE}
+order_weekday <- orders_data %>% mutate(purchase_weekday = wday(order_purchase_timestamp), purchase_hour = format(strptime(order_purchase_timestamp, "%Y-%m-%d %H:%M:%S"),'%H')) %>%  group_by(purchase_weekday, purchase_hour) %>% summarise(total_transactions = n())
+
+p <- plot_ly(data = order_weekday, 
+             x = ~purchase_hour,
+             y = ~purchase_weekday,
+             z = ~total_transactions,
+             type = "heatmap",
+             width = 1050,
+             height = 500,
+             colors = colorRamp(c("white","yellow", "red")))  %>%
+      layout(title = 'Transactions over the hour by day',
+             xaxis = list(title = 'Hour'),
+             yaxis = list(title = 'Day', tickvals = c(1, 2, 3, 4, 5, 6, 7), ticktext = c("Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday")),
+             legend = list(title = "Total Transactions")) %>% 
+  add_annotations(x = order_weekday$purchase_hour, y = order_weekday$purchase_weekday, text = order_weekday$total_transactions, xref = 'x', yref = 'y', showarrow = FALSE, font=list(color='black'))
+p
+```
+
+The heatmap indiciates that the majority of the transactions occur over the weekdays during office hours. We can thus increases our marketing strategies during this period.
+
+## Total payment vs Total Transactions based on payment methods
+
+```{r Sarang3, message=FALSE, warning=FALSE}
+payment_sum <- payments_data %>% filter(payment_type != "not_defined") %>% group_by(payment_type) %>% summarise(sum = sum(payment_value))
+payment_count <- payments_data %>% filter(payment_type != "not_defined") %>% group_by(payment_type) %>% summarise(count = n())
+p <- plot_ly() %>%
+add_pie(data = payment_count, labels = ~payment_type, values = ~count, domain = list(x = c(0, 0.4), y = c(0.4, 1))) %>%
+add_pie(data = payment_sum, labels = ~payment_type, values = ~sum, domain = list(x = c(0.6, 1), y = c(0.4, 1))) %>%
+layout(title = "Number of payments vs Total payment values", showlegend = F,
+xaxis = list(showgrid = FALSE, zeroline = FALSE, showticklabels = FALSE),
+yaxis = list(showgrid = FALSE, zeroline = FALSE, showticklabels = FALSE))
+
+p
+```
+
+The market in brazil is heavily dominated by credit card payments. Credit cards are used in ~74% of the total transactions amounting to ~78% of the total market revenue for Olist.
+
+## Payment type growth analysis 
+
+```{r Sarang4, message=FALSE, warning=FALSE}
+payment_group <- payments_data %>% filter(payment_type != "not_defined") %>% group_by(order_ID, payment_type) %>% summarise(count = n())
+payment_order_group <- payment_group %>% left_join(orders_data) %>% select(order_ID, payment_type, count, order_purchase_timestamp) %>% mutate(purchase_mny = format(strptime(order_purchase_timestamp, "%Y-%m-%d %H:%M:%S"),'%Y-%m'))
+payment_abc <- payment_order_group %>% group_by(purchase_mny, payment_type) %>% summarise(total_count = n())%>% ungroup()
+
+p <- plot_ly(payment_abc, x = ~purchase_mny, y = ~total_count, color = ~payment_type, type = 'scatter', mode = 'lines+markers') %>% layout(title = 'Payment type growth monthly',
+       xaxis = list(title = 'Time (Year - Month)'),
+       yaxis = list(title = 'Total number of transactions'))
+p
+```
+
+
+```{r Priyal-Data Cleaning and Manipulation, message=FALSE, warning=FALSE}
+
+geo_data <-  distinct(geolocation_data,geolocation_state,geolocation_zip_code_prefix,geolocation_city, .keep_all = TRUE)
+
+# customer's geo location data
+customers_geo_data <- customers_data %>%                  
+          left_join(geo_data,by=c("customer_state"="geolocation_state",
+                                  "customer_city"="geolocation_city",
+                                  "customer_zip_code_prefix" ="geolocation_zip_code_prefix")) %>%
+          rename("customer_geolocation_lat" = "geolocation_lat", 
+                 "customer_geolocation_lng" = "geolocation_lng" ) %>%
+          drop_na(customer_geolocation_lat,customer_geolocation_lng)
+
+# seller's geo location data
+sellers_geo_data <- sellers_data %>% 
+  left_join(geo_data,by=c("seller_state"="geolocation_state",
+                                  "seller_city"="geolocation_city",
+                                  "seller_zip_code_prefix" ="geolocation_zip_code_prefix")) %>%
+          rename("seller_geolocation_lat" = "geolocation_lat", 
+                 "seller_geolocation_lng" = "geolocation_lng" ) %>%
+          drop_na(seller_geolocation_lat,seller_geolocation_lng)
+
+# data manipulation data frame for sellers and orders delivered by these sellers
+seller_orders_data <- items_data %>%  left_join(sellers_geo_data, by="seller_ID") %>% 
+                 left_join(orders_data, by="order_ID") %>%
+                 left_join(customers_geo_data, by="customer_ID") %>%
+                 drop_na(order_approved_at,order_purchase_timestamp,order_delivered_carrier_date,
+                         order_delivered_customer_date,seller_geolocation_lat,seller_geolocation_lng,
+                         customer_geolocation_lat,customer_geolocation_lng) %>%
+                 filter(order_status == "delivered") %>%
+                 mutate(approved_in_days = round(difftime(strptime(order_approved_at, 
+                                                                   format = "%Y-%m-%d %H:%M:%S"),
+                                                    strptime(order_purchase_timestamp, 
+                                                             format="%Y-%m-%d %H:%M:%S"),
+                                                    units="days")),
+                        delivered_in_days = round(difftime(strptime(order_delivered_customer_date, 
+                                                                   format = "%Y-%m-%d %H:%M:%S"),
+                                                    strptime(order_purchase_timestamp, 
+                                                             format="%Y-%m-%d %H:%M:%S"),
+                                                    units="days")),
+                        estimated_in_days = round(difftime(strptime(order_estimated_delivery_date, 
+                                                                   format = "%Y-%m-%d"),
+                                                    strptime(order_purchase_timestamp, 
+                                                             format="%Y-%m-%d %H:%M:%S"),
+                                                    units="days")),
+                        del_to_carrier_in = round(difftime(strptime(order_delivered_carrier_date, 
+                                                                   format = "%Y-%m-%d %H:%M:%S"),
+                                                    strptime(order_approved_at, 
+                                                             format="%Y-%m-%d %H:%M:%S"),
+                                                    units="days")),
+                        delay = round(difftime(strptime(order_delivered_customer_date, 
+                                                                   format = "%Y-%m-%d %H:%M:%S"),
+                                                    strptime(order_estimated_delivery_date, 
+                                                             format="%Y-%m-%d"),
+                                                    units="days"))) %>%
+                 separate(order_purchase_timestamp , into=c("purchase_year", 
+                                                            "purchase_month", "purchase_date"), 
+                          sep="-") %>%
+                 separate(purchase_date , into=c("purchase_date", "purchase_time"), sep=" ") %>%
+                 select(seller_ID, seller_city, seller_zip_code_prefix, seller_state,
+                        seller_geolocation_lat, seller_geolocation_lng,
+                        customer_ID, customer_city, customer_state,customer_zip_code_prefix,
+                        customer_geolocation_lat,customer_geolocation_lng,
+                        order_ID, product_ID, approved_in_days,delivered_in_days, 
+                        estimated_in_days, del_to_carrier_in, delay,
+                        purchase_year,purchase_month, purchase_date) %>%
+                 mutate(delay = as.factor(if_else(delay <= 0 , 0, 1)))
+
+
+```
+
+## Top 10 Sellers and their Product Categories
+```{r Priyal1, message=FALSE, warning=FALSE}
+# Top 10 sellers
+top_sellers <- seller_orders_data %>% group_by(seller_ID) %>% 
+               summarise(total_orders=n()) %>% top_n(10,total_orders) 
+
+# Top 10 Product Categories
+products_data_english <- left_join(products_data,translations_data, by = c("product_category_name"))
+
+products_data_eng_items <- left_join(items_data,products_data_english, by = "product_ID")
+
+Top10_Product <- products_data_eng_items %>%  
+  filter(!is.na(product_category_name_english)) %>%  
+  group_by(product_category_name_english) %>% 
+  tally(sort = TRUE) %>% 
+  top_n(10)
+
+# Yearly Analysis
+yearly_product_sold <- seller_orders_data %>% 
+                       left_join(products_data, by="product_ID")  %>% 
+                       left_join(translations_data,by="product_category_name") %>%
+                       group_by(seller_ID, purchase_year, purchase_month) %>% 
+                       filter(seller_ID %in% top_sellers$seller_ID)%>% 
+                       mutate(seller_name = paste0("Seller_", seller_ID),
+                              product_category_name_english = ifelse(product_category_name_english %in%
+                                                             Top10_Product$product_category_name_english,
+                                                             product_category_name_english, "Others"))
+
+# Plot
+top_seller_yearly_categories <- ggplot(yearly_product_sold,
+                                       aes(x=purchase_year, fill=product_category_name_english,
+                                           name="Product Categories")) +
+                                geom_bar() + facet_grid(. ~ seller_name) +
+                                labs(x = "Year", y= "Product Count")+
+                                guides(fill=guide_legend("Product Categories")) 
+                                
+
+ggplotly(top_seller_yearly_categories)
+
+```
+
+## Customer and Seller Distribution Across Brazil
+```{r Priyal2, message=FALSE, warning=FALSE}
+#Plot all Cutomers and Sellers on Single Plot
+                
+seller_loc_data <-  distinct(seller_orders_data,seller_ID, .keep_all = TRUE)
+
+seller_loc_data <- seller_loc_data %>% mutate(seller_geolocation_lat = seller_geolocation_lat+0.5) %>%
+                                      filter(seller_geolocation_lat  > -34, seller_geolocation_lng > -70)
+
+seller_loc_data$img = sample(c("location.png"),nrow(seller_loc_data),replace=TRUE)
+
+customer_loc_data <-  distinct(customers_geo_data,customer_geolocation_lat,customer_geolocation_lng, .keep_all = TRUE)
+
+customer_loc_data <- customer_loc_data %>% 
+                      mutate(customer_geolocation_lat = customer_geolocation_lat) %>%
+                      filter(customer_geolocation_lat > -34, customer_geolocation_lat < 4, 
+                             customer_geolocation_lng > -70)
+
+seller_map <-  ggplot() + 
+                   geom_sf(data=state, fill="grey", color="brown", size=.15, show.legend = FALSE) + 
+                   geom_image(data= seller_loc_data, mapping = aes(x=seller_geolocation_lng,
+                                                                   y=seller_geolocation_lat,
+                                                                   image=img, 
+                                                                   label = rownames(seller_loc_data)), 
+                              size=0.02) +
+                   facet_wrap(~purchase_year) +
+                   geom_sf_label(data=state, aes(label = abbrev_state), 
+                                 label.padding= unit(0.15, "lines"), label.size = 0.05) +
+                   labs(x = "Longitude", y= "Latitude")
+
+seller_map
+
+```
+
+## Top 10 Sellers Delivery and Mean-Estimation Time  
+```{r Priyal3,  message=FALSE, warning=FALSE}
+
+# Delivery distribution of top 10 sellers
+delivery_distribution <- top_sellers %>%
+               left_join(seller_orders_data,by="seller_ID") %>% group_by(seller_ID) %>% 
+               select(seller_ID,order_ID,approved_in_days,
+                      delivered_in_days,estimated_in_days, del_to_carrier_in)%>% 
+               mutate(seller_name = paste0("Seller_", seller_ID))
+
+# Average Delivery Estimation by top 10 Sellers
+mean_delivery_estimate <- delivery_distribution %>% group_by(seller_ID) %>% 
+                 summarize(avg_estimated_days = mean(estimated_in_days)) %>%
+                 mutate(seller_name = paste0("Seller_", seller_ID))
+
+# Average Delivery to Carrier
+avg_carrier_del_days <- delivery_distribution %>% group_by(seller_ID) %>% 
+                 summarize(mean_carrier_del = mean(del_to_carrier_in)) %>%
+                 mutate(seller_name = paste0("Seller_", seller_ID))
+
+
+# Box plot for Delivery Distribution and Estimated Delivery
+delivery_dist_plot <- plot_ly(data = mean_delivery_estimate, x = ~seller_name, y = ~avg_estimated_days,
+                              type='scatter', mode="lines", name ="Estimated Delivery") %>% 
+                      add_trace(data= avg_carrier_del_days, x= ~seller_name, y= ~mean_carrier_del,
+                                type='scatter',mode="lines", name ="Carrier Delivery") %>%
+                      add_boxplot(data = delivery_distribution, x = ~seller_name, y = ~delivered_in_days,
+                                  color = ~seller_name, type = "box" , name= ~seller_name) %>%
+                      layout(xaxis=list(title = "Top 10 Sellers", type = "category", 
+                                        categoryorder = "array", 
+                                        categoryarray = mean_delivery_estimate$seller_name,
+                                        size=8), 
+                             yaxis=list(title = "Number of Days", 
+                                        range = c(0,50),
+                                        size=8)) 
+
+delivery_dist_plot
+```
+
+
+```{r Priyal4,  message=FALSE, warning=FALSE}
+
+loc_data <- seller_orders_data %>% group_by(seller_ID) %>% 
+               summarise(products_sold=n()) %>% top_n(10,products_sold)  %>%
+               left_join(seller_orders_data,by="seller_ID") %>% 
+               group_by(seller_ID, customer_state, customer_city) %>% 
+               mutate(seller_name = paste0("Seller_", seller_ID)) 
+                
+loc_data <-  distinct(loc_data,seller_ID,customer_ID, .keep_all = TRUE)
+
+loc_data <- distinct(loc_data,seller_ID,customer_state,customer_city,customer_zip_code_prefix, .keep_all = TRUE)
+
+top_seller_loc_data <- loc_data %>% mutate(seller_geolocation_lat = seller_geolocation_lat+1.5) %>%
+                                group_by(seller_name, seller_geolocation_lat,seller_geolocation_lng) %>%
+                                count()
+
+top_seller_loc_data$img = sample(c("location.png"),size=10,replace=TRUE)
+
+
+delay_stats <- loc_data  %>% group_by(seller_name) %>% summarise(prop = round((sum(delay==1)/n())*100,2)) 
+
+  
+seller_cust_map <- ggplot() + 
+                   geom_sf(data=state, fill="grey", color="brown", size=.15, show.legend = FALSE) + 
+                   geom_point(data=loc_data, mapping = aes(x=customer_geolocation_lng,
+                                                           y=customer_geolocation_lat,
+                                                           color=delay), position="jitter", size= 1) +
+                   geom_image(data= top_seller_loc_data, mapping = aes(x=seller_geolocation_lng,
+                                                                   y=seller_geolocation_lat,
+                                                                   image=img, 
+                                                                   label = rownames(top_seller_loc_data)), 
+                              size=0.1) +
+                   facet_wrap(~seller_name) +
+                   geom_text(data = delay_stats, mapping = aes(x = -Inf, y = -Inf, 
+                                                               label = paste0("Delay = ",prop,"%")),
+                   hjust = -0.1, vjust   = -1) +
+                   scale_color_manual(breaks = c("1", "0"), labels = c("Delayed","On Time"), 
+                                      name = "Delivery Status",
+                        values=c("white", "blue")) +
+                   labs(x = "Longitude", y= "Latitude",   size=8) 
+
+seller_cust_map
+```
+
+
+## Harshita
+Top 10 sold product category
+
+```{r Harshita1, message=TRUE, warning=TRUE}
+############### Top 10_Product Barplot###############
+
+#joining products_data,translations_Data to get translated product category name
+products_data_english <- left_join(products_data,translations_data, by = c("product_category_name" = "product_category_name"))
+
+#Top 10 product categories
+Top10_Product <- products_data_english %>%  
+  filter(!is.na(product_category_name_english)) %>%  
+  group_by(product_category_name_english) %>%
+  tally(sort = TRUE) %>%
+  top_n(10)
+
+#joining with items data
+products_data_eng_items <- left_join(items_data,products_data_english, by = "product_ID")
+
+#joining with orders data
+Top10_Products <- products_data_eng_items %>% left_join(orders_data, by = "order_ID") %>% group_by(product_category_name_english) %>%
+  filter(order_status == "delivered")
+
+#extracting delivery year and month
+Top10_Products$order_delivered_customer_date = as.Date(Top10_Products$order_delivered_customer_date, "%Y-%m-%d")
+Top10_Products$order_delivered_customer_date =  as.numeric(format(Top10_Products$order_delivered_customer_date, "%Y"))
+
+#Top 10 products yearwise 17-18
+Top10_Products %>%  group_by(product_category_name_english) %>%
+  count(product_category_name_english, order_delivered_customer_date) %>%
+  filter(product_category_name_english %in% Top10_Product$product_category_name_english) %>% filter(order_delivered_customer_date %in% c("2017","2018")) %>%
+  ggplot() + geom_bar(mapping = aes(x = reorder(product_category_name_english,n), y = n), stat = "identity", color='blue', width = 0.5, fill="green") + facet_wrap(~order_delivered_customer_date) +  xlab("Top product categories sold") + ylab("Count of Products in Category") + coord_flip()
+
+```
+
+Price distribution of Top 10 product categories
+
+```{r Harshita2, message=TRUE, warning=TRUE}
+############### Top 10_Product Boxplot###############
+#Top 10 products price distribution
+Top10_Products %>%  filter(!is.na(product_category_name_english))  %>%
+   filter(product_category_name_english %in% Top10_Product$product_category_name_english) %>% filter(order_delivered_customer_date %in% c("2017","2018")) %>%  group_by(product_category_name_english,order_delivered_customer_date) %>% ggplot() + geom_boxplot(aes(x = reorder(product_category_name_english,price), y = price), fill = "maroon") + ylim(0,1000)  +
+  xlab("Top product categories sold") + ylab("Price Distribution") +  coord_flip() + facet_wrap(~order_delivered_customer_date)
+```
+
+Sale breakdown of most sold product categories
+
+```{r Harshita3, message=TRUE, warning=TRUE}
+############### Top 10_Product Barplot###############
+#statewise Distribution of Top product categories sold
+p <- Top10_Products %>% left_join(sellers_data, by = "seller_ID") %>%
+  filter(product_category_name_english %in% Top10_Product$product_category_name_english) %>%
+  ggplot() +
+  geom_bar(aes(product_category_name_english,fill=seller_state),width=1) +
+  xlab("Top product categories sold")  + coord_flip()
+
+ggplotly(p)
+
+```
+
+Price, Freight distribution
+
+```{r Harshita4, message=TRUE, warning=TRUE}
+############### Bar Chart with Line Plot ###############
+plot2 <- products_data_eng_items %>% inner_join(Top10_Product, by = "product_category_name_english") %>% group_by(product_category_name_english) %>% summarize(pv = sum(price), fv = sum(freight_value))
+
+y <- plot2$product_category_name_english
+x_price <- plot2$pv
+x_freight <- plot2$fv
+data <- data.frame(y, x_price, x_freight)
+
+x_drop <- droplevels(data$y)  # Apply droplevels in R
+
+p1 <- plot_ly(x = ~x_price, y = ~x_drop, name = 'Total price of products sold in the category',
+              type = 'bar', orientation = 'h',
+              marker = list(color = 'rgba(26, 171, 96, 0.7)',
+                            line = list(color = 'rgba(50, 171, 96, 1.0)', width = 1))) %>%
+  layout(yaxis = list(showgrid = FALSE, showline = FALSE, showticklabels = TRUE, domain= c(0, 0.85)),
+         xaxis = list(zeroline = FALSE, showline = FALSE, showticklabels = TRUE, showgrid = TRUE)) %>%
+  add_annotations(xref = 'x1', yref = 'y',
+                  x = x_price ,  y = x_drop,
+                  text = paste(round(x_price)),
+                  font = list(family = 'Arial', size = 12, color = 'rgb(96, 96, 96)'),
+                  showarrow = FALSE)
+
+p2 <- plot_ly(x = ~x_freight, y = ~x_drop, name = 'Total freight value of products in category',
+              type = 'scatter', mode = 'lines+markers',
+              line = list(color = 'rgb(128, 0, 128)')) %>%
+  layout(yaxis = list(showgrid = FALSE, showline = TRUE, showticklabels = FALSE,
+                       linecolor = 'rgba(102, 102, 102, 0.8)', linewidth = 3,
+                       domain = c(0, 0.95)),
+         xaxis = list(zeroline = FALSE, showline = FALSE, showticklabels = TRUE, showgrid = TRUE,
+                       side = 'left', dtick = 25000)) %>%
+  add_annotations(xref = 'x2', yref = 'y',
+                  x = x_freight, y = x_drop,
+                  text = paste(round(x_freight)),
+                  font = list(family = 'Arial', size = 12, color = 'rgb(128, 128, 128)'),
+                  showarrow = TRUE)
+
+p <- subplot(p1, p2) %>%
+  layout(legend = list(x = 0.029, y = 1.038,
+                       font = list(size = 11)),
+         margin = list(l = 100, r = 20, t = 90, b = 70),
+         paper_bgcolor = 'rgb(255, 255, 255)',
+         plot_bgcolor = 'rgb(255, 255, 255)') %>%
+  add_annotations(xref = 'paper', yref = 'paper',
+                  x = -0.14, y = -0.15,
+                  text = paste('.'),
+                  font = list(family = 'Arial', size = 12, color = 'rgb(150,150,150)'),
+                  showarrow = FALSE)
+
+p
+
+```
+
+Freight spread of top 10 product categories
+
+```{r Harshita5, message=TRUE, warning=TRUE}
+############### Box Plot with freight value distribution and product categories ###############
+products_data_eng_items  %>% select(product_category_name_english, price, freight_value) %>%
+  filter(product_category_name_english %in% x_drop ) %>%
+  plot_ly(y = ~freight_value, color = ~product_category_name_english, type = "box") %>% layout( xaxis = list(title = 'Product categories'), yaxis = list(title = 'Freight Value'))
+
+```
+
+State vs Delivery Days
+
+```{r Harshita6, message=TRUE, warning=TRUE}
+new_orders_data <- orders_data %>%
+  mutate(Delivery_days =  as.integer(difftime(as.POSIXct(strptime(orders_data$order_delivered_customer_date, "%Y-%m-%d %H:%M:%S")), as.POSIXct(strptime(orders_data$order_estimated_delivery_date, "%Y-%m-%d %H:%M:%S")), units = "days")), " ")
+
+customers_data1 <- new_orders_data %>% full_join(customers_data, by = "customer_ID") %>% group_by(customer_state)
+
+plot_ly(customers_data1, y = ~Delivery_days, color = ~customer_state, type = "box") %>%
+  layout(xaxis = list(title = 'State'), yaxis = list(title = 'Delivery days'))
+
+```
+
+Unique Product lines added
+
+```{r Harshita7, message=TRUE, warning=TRUE}
+#products_data and translations_Data to get product name in english in product data
+Products_details1 <- left_join(products_data,translations_data, by = c("product_category_name" = "product_category_name"))
+
+#join Products_details1 with items data to get all info on both
+Products_orders_details1 <- left_join(items_data,Products_details1, by = "product_ID")
+
+#add column volume
+Products_orders_details1 <- Products_orders_details1 %>% mutate(volume = product_length_cm * product_height_cm * product_width_cm)
+
+Products_orders_items1 <- left_join(Products_orders_details1,orders_data, by = "order_ID")
+Products_orders_items1 <- left_join(Products_orders_items1, customers_data, by = "customer_ID")
+Products_orders_items1 <- left_join(Products_orders_items1, sellers_data, by = "seller_ID")
+Products_orders_items1 <- left_join(Products_orders_items1, reviews_data, by = "order_ID")
+
+# add column for purchase year
+Products_orders_items2 <- Products_orders_items1 %>%
+  mutate(purchase_year = year(Products_orders_items1$order_purchase_timestamp)) %>%
+  mutate(purchase_month = month(Products_orders_items1$order_purchase_timestamp)) %>%
+  filter(!is.na(product_category_name_english)) %>%
+  filter(!(purchase_month == "9" & purchase_year == "2018")) %>% group_by(purchase_year,purchase_month) %>%
+  summarize(n = n_distinct(product_category_name_english))
+
+Products_orders_items2$purchase_month <- as.factor(Products_orders_items2$purchase_month)
+
+p <- ggplot(data=Products_orders_items2, aes(x=purchase_month, y=n, group=1)) +
+  geom_line(color= "green") +
+  geom_point(color= "darkblue") + facet_wrap(~purchase_year) +
+  xlab("Month") + ylab("Unique Product Categories count")
+
+ggplotly(p)
+
+```
+
+3D distribution for most sold categories
+
+```{r Harshita8, message=TRUE, warning=TRUE}
+
+p5 <- Products_orders_items1 %>% mutate(product_category_name_english = ifelse(as.character(product_category_name_english) %in% Top10_Product$product_category_name_english, as.character(product_category_name_english), "Others"))%>% group_by(product_category_name_english,review_score)
+
+p6 <- p5 %>% summarise(fv = mean(freight_value), pv = mean(price))
+ 
+p <- plot_ly(p6, x = ~review_score, y = ~pv, z = ~fv, color = ~product_category_name_english , colors = c('green', 'red')) %>%
+  add_markers() %>%
+  layout(scene = list(xaxis = list(title = 'Mean Review Score'),
+                     yaxis = list(title = 'Mean Price'),
+                     zaxis = list(title = 'Mean Freight Value')))%>%
+  layout(xaxis = list(title = 'State'), yaxis = list(title = 'Delivery days'))
+
+
+p
+
+```

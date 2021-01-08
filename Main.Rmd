@@ -1,0 +1,216 @@
+---
+title: "Project"
+author: "All"
+date: "11/6/2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+### Libraries
+
+```{r}
+library(ggplot2)
+library(dplyr)
+library(stringr)
+library(plotly)
+library(tidyverse)
+library(geobr)
+library(rnaturalearth)
+library(rnaturalearthdata)
+library(rgeos)
+library(lubridate)
+
+
+```
+
+### Data Processing
+
+```{r data_reading}
+customers_data <- read.csv("brazilian-ecommerce/olist_customers_dataset.csv", stringsAsFactors = FALSE)
+geolocation_data <- read.csv("brazilian-ecommerce/olist_geolocation_dataset.csv")
+items_data <- read.csv("brazilian-ecommerce/olist_order_items_dataset.csv")
+payments_data <- read.csv("brazilian-ecommerce/olist_order_payments_dataset.csv")
+reviews_data <- read.csv("brazilian-ecommerce/olist_order_reviews_dataset.csv")
+orders_data <- read.csv("brazilian-ecommerce/olist_orders_dataset.csv")
+products_data <- read.csv("brazilian-ecommerce/olist_products_dataset.csv")
+sellers_data <- read.csv("brazilian-ecommerce/olist_sellers_dataset.csv")
+translations_data <- read.csv("brazilian-ecommerce/product_category_name_translation.csv")
+brazil_holidays_data <- read.csv("brazilian-ecommerce/brazil_holidays.csv")
+state <- read_state(code_state="all", year=2018) 
+```
+
+```{r data_cleaning}
+create_column_mapping <- function(old_column, new_column, dataframe, filename) {
+  if(new_column %in% colnames(dataframe))
+  {
+    return(dataframe)
+  }
+  column1 <- seq.int(nrow(unique(dataframe[old_column])))
+  column2 <- unique(dataframe[old_column])
+  mapping <- data.frame(column1, column2)
+  names(mapping) <- c(new_column, old_column)
+  dataframe <- dataframe %>% left_join(mapping, by = old_column) %>% select(-old_column)
+  write.csv(mapping, filename, row.names=FALSE)  
+  return(dataframe)
+}
+
+implement_mapping <- function(dataframe, column_name){
+  mapping <- switch(column_name, 
+                    "order_id" = read.csv("brazilian-ecommerce/olist_orders_translation_dataset.csv"),
+                    "customer_id" = read.csv("brazilian-ecommerce/olist_customers_translation_dataset.csv"),
+                    "product_id" = read.csv("brazilian-ecommerce/olist_products_translation_dataset.csv"),
+                    "seller_id" = read.csv("brazilian-ecommerce/olist_sellers_translation_dataset.csv")) 
+  df <- dataframe %>% left_join(mapping, by = column_name) %>% select(-column_name)
+  rm(mapping)
+  return(df)
+}
+
+customers_data <- create_column_mapping("customer_id", "customer_ID", customers_data, "brazilian-ecommerce/olist_customers_translation_dataset.csv")
+orders_data <- create_column_mapping("order_id", "order_ID", orders_data, "brazilian-ecommerce/olist_orders_translation_dataset.csv")
+products_data <- create_column_mapping("product_id", "product_ID", products_data, "brazilian-ecommerce/olist_products_translation_dataset.csv")
+sellers_data <- create_column_mapping("seller_id", "seller_ID", sellers_data, "brazilian-ecommerce/olist_sellers_translation_dataset.csv")
+reviews_data <- create_column_mapping("review_id", "review_ID", reviews_data, "brazilian-ecommerce/olist_reviews_translation_dataset.csv")
+
+reviews_data <- implement_mapping(reviews_data, "order_id")
+payments_data <- implement_mapping(payments_data, "order_id")
+items_data <- implement_mapping(items_data, "order_id")
+orders_data <- implement_mapping(orders_data, "customer_id")
+items_data <- implement_mapping(items_data, "product_id")
+items_data <- implement_mapping(items_data, "seller_id")
+```
+
+### Data Manipulation
+
+```{r data_manipulation}
+
+```
+
+### Exploratory Data Analysis
+```{r sonal}
+geo_data <-  distinct(geolocation_data,geolocation_state,geolocation_zip_code_prefix,geolocation_city, .keep_all = TRUE)
+ordertable <- plyr::join(orders_data,customers_data, by= "customer_ID")
+ordergeotable <- left_join(ordertable,geo_data, by= c("customer_zip_code_prefix"="geolocation_zip_code_prefix","customer_state"="geolocation_state", "customer_city"="geolocation_city"))
+
+ordertable <- separate(ordertable,order_delivered_customer_date , into=c("deldate", "deltime"), sep=" ")
+ordertable <- separate(ordertable,order_purchase_timestamp , into=c("purchasedate", "purchasetime"), sep=" ")
+ordertable <- separate(ordertable,order_approved_at , into=c("approveddate", "approvedtime"), sep=" ")
+ordertable <- separate(ordertable,order_delivered_carrier_date , into=c("delcarrierdate", "delcarriertime"), sep=" ")
+ordertable <- separate(ordertable,order_estimated_delivery_date , into=c("estimateddeldate", "estimateddeltime"), sep=" ")
+ordertable <- separate(ordertable, deldate , into=c("year", "month", "date"), sep="-")
+ordertable <- separate(ordertable, purchasedate , into=c("year", "month", "date"), sep="-")
+
+#plot 1
+
+#ploting the order status of customers of each state using the bar graph
+custplot <- ordertable  %>%
+  filter(order_status %in% c("delivered", "canceled"))%>%
+  ggplot(aes(x=customer_state, fill=order_status)) +
+  geom_bar(show.legend=FALSE)+facet_wrap(~order_status, scales = "free")+
+  labs(x="Customer states in brazil", y="No. of orders of different status for customers in different states" , title = "Order status plot of customers of different state")
+ggplotly(custplot)
+
+#plot 2
+
+
+g <- ggplot() + 
+  geom_sf(data=state, fill="#2D3E50", color="#FEBF57", size=.15, show.legend = FALSE) 
+print(g)
+#all states
+a <- g + geom_point(ordergeotable, mapping = aes(x=geolocation_lng, y=geolocation_lat, color = customer_state), position = "jitter", size=.15, alpha=1/2)+
+  coord_sf(xlim = c(-70,-30), ylim = c(-40,5), expand = FALSE)+
+  labs(y="Latitude of location.", x="Longitude of location.",title="Mapping of different states of brazil in Map")
+
+plot(a)
+
+#plot 3
+## Customer Repetition
+
+# add column for purchase year
+freq_count <- as.data.frame(table(ordertable$customer_unique_id))
+odtbl <- ordertable %>% select_at(vars(year, month, customer_unique_id)) %>%
+  distinct_at(vars(year,month, customer_unique_id)) %>% 
+  arrange_at(vars(year, month)) %>% 
+  count_(vars(year, month)) %>% 
+  ggplot() + geom_line(mapping = aes(x = month, y = n, group = 1, color="red"),show.legend = FALSE) +facet_wrap(~year)+geom_point(mapping = aes(x = month, y = n, group = 1, color="red",show.legend=FALSE),show.legend = FALSE)+labs(x="Month", y="Count of new customers added each month", title = "New customers purchased every consecutive month")
+
+ggplotly(odtbl)
+
+```
+
+```{r Priyal}
+
+```
+
+
+```{r Harshita}
+
+```
+
+```{r Sarang1}
+a <- items_data %>% left_join(orders_data) %>% mutate(week = strftime(order_purchase_timestamp, format = "%V")) %>% group_by(week) %>% summarise(total = sum(price)) %>% arrange(week)
+
+brazil_holidays <- brazil_holidays_data %>% mutate(Week = strftime(Date, format = "%V")) %>% group_by(Week) %>% mutate(holidays_by_week = paste0(Holiday, collapse = ",")) %>% select(Week, holidays_by_week)
+
+brazil_holidays <- brazil_holidays[!duplicated(brazil_holidays$Week),]
+
+p <- plot_ly(a, x = ~week, y = ~total, type = 'scatter', mode = 'lines')
+
+p <- p %>%
+  add_trace(
+    type = 'bar',
+    x = brazil_holidays$Week, 
+    y = 450000,
+    text = brazil_holidays$holidays_by_week,
+    hoverinfo = 'text',
+    marker = list(color='yellow'),
+    showlegend = F,
+    width = 0.3
+  ) %>% layout(xaxis = list(autotick = F, dtick = 1)) 
+
+p
+```
+
+```{r Sarang2}
+order_weekday <- orders_data %>% mutate(purchase_weekday = wday(order_purchase_timestamp), purchase_hour = format(strptime(order_purchase_timestamp, "%Y-%m-%d %H:%M:%S"),'%H')) %>%  group_by(purchase_weekday, purchase_hour) %>% summarise(total_transactions = n())
+
+p <- plot_ly(data = order_weekday, 
+             x = ~purchase_hour,
+             y = ~purchase_weekday,
+             z = ~total_transactions,
+             type = "heatmap",
+             width = 1050,
+             height = 500,
+             colors = colorRamp(c("white","yellow", "red")))  %>%
+      layout(title = 'Transactions over the hour by day',
+             xaxis = list(title = 'Hour'),
+             yaxis = list(title = 'Day', tickvals = c(1, 2, 3, 4, 5, 6, 7), ticktext = c("Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday")),
+             legend = list(title = "Total Transactions")) %>% 
+  add_annotations(x = order_weekday$purchase_hour, y = order_weekday$purchase_weekday, text = order_weekday$total_transactions, xref = 'x', yref = 'y', showarrow = FALSE, font=list(color='black'))
+p
+```
+
+
+```{r Sarang3}
+payment_sum <- payments_data %>% filter(payment_type != "not_defined") %>% group_by(payment_type) %>% summarise(sum = sum(payment_value))
+payment_count <- payments_data %>% filter(payment_type != "not_defined") %>% group_by(payment_type) %>% summarise(count = n())
+p <- plot_ly() %>%
+add_pie(data = payment_count, labels = ~payment_type, values = ~count, domain = list(x = c(0, 0.4), y = c(0.4, 1))) %>%
+add_pie(data = payment_sum, labels = ~payment_type, values = ~sum, domain = list(x = c(0.6, 1), y = c(0.4, 1))) %>%
+layout(title = "Number of payments vs Total payment values", showlegend = F,
+xaxis = list(showgrid = FALSE, zeroline = FALSE, showticklabels = FALSE),
+yaxis = list(showgrid = FALSE, zeroline = FALSE, showticklabels = FALSE))
+
+p
+```
+
+```{r Sarang4}
+payment_group <- payments_data %>% filter(payment_type != "not_defined") %>% group_by(order_ID, payment_type) %>% summarise(count = n())
+payment_order_group <- payment_group %>% left_join(orders_data) %>% select(order_ID, payment_type, count, order_purchase_timestamp) %>% mutate(purchase_mny = format(strptime(order_purchase_timestamp, "%Y-%m-%d %H:%M:%S"),'%Y-%m'))
+payment_abc <- payment_order_group %>% group_by(purchase_mny, payment_type) %>% summarise(total_count = n())%>% ungroup()
+
+p <- plot_ly(payment_abc, x = ~purchase_mny, y = ~total_count, color = ~payment_type, type = 'scatter', mode = 'lines+markers')
+p
+```
